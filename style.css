@@ -1,0 +1,12 @@
+body { margin: 0; overflow: hidden; background: #000; font-family: monospace; }
+#ui {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    color: #0f0;
+    text-shadow: 1px 1px #000;
+    pointer-events: none;
+}
+.telemetry { font-size: 1.2rem; margin-bottom: 10px; }
+.controls-hint { font-size: 0.8rem; opacity: 0.8; }
+canvas { display: block; }
