@@ -2,25 +2,27 @@ import * as THREE from './lib/three.module.min.js';
 
 let scene, camera, renderer, clock;
 const keys = {};
+const buildings = []; // Track buildings for collision
 
 // Physics Constants
 const GRAVITY = 9.81;
-const THRUST_MAX = 35.0; // Increased for city flying
+const THRUST_MAX = 35.0;
 const DRAG = 0.015;
 const ANGULAR_RATE = 4.0; 
 
 // Drone State
 const drone = {
-    position: new THREE.Vector3(0, 10, 50),
+    position: new THREE.Vector3(0, 15, 60),
     velocity: new THREE.Vector3(0, 0, 0),
     rotation: new THREE.Euler(0, 0, 0, 'YXZ'),
-    throttle: 0
+    throttle: 0,
+    width: 0.5 // Collision radius
 };
 
 function init() {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x88ccff);
-    scene.fog = new THREE.Fog(0x88ccff, 20, 400);
+    scene.fog = new THREE.Fog(0x88ccff, 10, 300);
     
     camera = new THREE.PerspectiveCamera(85, window.innerWidth / window.innerHeight, 0.1, 1000);
     
@@ -30,51 +32,63 @@ function init() {
 
     clock = new THREE.Clock();
 
-    // Lighting
-    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
     const sun = new THREE.DirectionalLight(0xffffff, 0.8);
-    sun.position.set(100, 200, 100);
+    sun.position.set(50, 200, 50);
     scene.add(sun);
 
-    // --- City Generation ---
-    const citySize = 1000;
-    const gridDivisions = 20;
-    const step = citySize / gridDivisions;
+    // --- Ground with Variation (Checkerboard) ---
+    // We create a canvas texture for variation without external images
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#1a1a1a'; // Dark asphalt
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.strokeStyle = '#333333'; // Lighter grid/cracks
+    ctx.strokeRect(0, 0, 64, 64);
+    
+    const groundTex = new THREE.CanvasTexture(canvas);
+    groundTex.wrapS = THREE.RepeatWrapping;
+    groundTex.wrapT = THREE.RepeatWrapping;
+    groundTex.repeat.set(200, 200);
 
-    // Ground/Roads
-    const groundGeo = new THREE.PlaneGeometry(citySize, citySize);
+    const groundGeo = new THREE.PlaneGeometry(2000, 2000);
     groundGeo.rotateX(-Math.PI / 2);
-    const groundMat = new THREE.MeshPhongMaterial({ color: 0x222222 });
+    const groundMat = new THREE.MeshPhongMaterial({ map: groundTex });
     scene.add(new THREE.Mesh(groundGeo, groundMat));
 
-    // Buildings (Randomized boxes)
+    // --- City Generation & Collision Logic ---
+    const citySize = 800;
+    const step = 40;
     const boxGeo = new THREE.BoxGeometry(1, 1, 1);
-    const boxMat = new THREE.MeshPhongMaterial({ color: 0x777777 });
-
+    
     for (let x = -citySize/2; x < citySize/2; x += step) {
         for (let z = -citySize/2; z < citySize/2; z += step) {
-            if (Math.random() > 0.6) { // 40% chance of a building
-                const h = 5 + Math.random() * 30;
-                const w = 10 + Math.random() * 15;
-                const building = new THREE.Mesh(boxGeo, boxMat);
+            if (Math.random() > 0.65) {
+                const h = 10 + Math.random() * 40;
+                const w = 8 + Math.random() * 12;
+                const building = new THREE.Mesh(boxGeo, new THREE.MeshPhongMaterial({ color: 0x555555 }));
                 building.scale.set(w, h, w);
-                building.position.set(x + step/2, h/2, z + step/2);
+                building.position.set(x, h/2, z);
+                
+                // Create a bounding box for collision
+                building.geometry.computeBoundingBox();
+                buildings.push(building);
                 scene.add(building);
             }
         }
     }
 
-    // --- FPV Drone "Rod" (The Antenna/Pitot Tube) ---
+    // --- FPV Rod ---
     const rodGroup = new THREE.Group();
-    const rodGeo = new THREE.CylinderGeometry(0.02, 0.02, 0.6);
-    const rodMat = new THREE.MeshPhongMaterial({ color: 0x111111 });
-    const rod = new THREE.Mesh(rodGeo, rodMat);
-    
-    rod.rotation.x = Math.PI / 2.2; // Angle it forward
-    rod.position.set(0, -0.4, -0.5); // Position below/in-front of lens
+    const rod = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.015, 0.015, 0.7),
+        new THREE.MeshPhongMaterial({ color: 0x050505 })
+    );
+    rod.rotation.x = Math.PI / 2.1;
+    rod.position.set(0, -0.45, -0.4);
     rodGroup.add(rod);
-    
-    // Parent rod to camera so it tilts with the drone view
     camera.add(rodGroup);
     scene.add(camera);
 
@@ -83,8 +97,34 @@ function init() {
     animate();
 }
 
+function resetDrone() {
+    drone.position.set(0, 15, 60);
+    drone.velocity.set(0, 0, 0);
+    drone.rotation.set(0, 0, 0);
+    drone.throttle = 0;
+}
+
+function checkCollisions() {
+    // Ground Collision
+    if (drone.position.y < 0.5) resetDrone();
+
+    // Building Collision
+    const droneBox = new THREE.Box3().setFromCenterAndSize(
+        drone.position, 
+        new THREE.Vector3(drone.width, drone.width, drone.width)
+    );
+
+    for (let i = 0; i < buildings.length; i++) {
+        const b = buildings[i];
+        const buildingBox = new THREE.Box3().setFromObject(b);
+        if (droneBox.intersectsBox(buildingBox)) {
+            resetDrone();
+            break;
+        }
+    }
+}
+
 function updatePhysics(dt) {
-    // Rotation logic (Acro mode)
     if (keys['KeyW']) drone.rotation.x -= ANGULAR_RATE * dt;
     if (keys['KeyS']) drone.rotation.x += ANGULAR_RATE * dt;
     if (keys['KeyA']) drone.rotation.z += ANGULAR_RATE * dt;
@@ -92,7 +132,6 @@ function updatePhysics(dt) {
     if (keys['ArrowLeft']) drone.rotation.y += ANGULAR_RATE * dt;
     if (keys['ArrowRight']) drone.rotation.y -= ANGULAR_RATE * dt;
 
-    // Throttle logic
     if (keys['ArrowUp']) drone.throttle = Math.min(drone.throttle + 2.0 * dt, 1.0);
     else if (keys['ArrowDown']) drone.throttle = Math.max(drone.throttle - 2.0 * dt, 0.0);
 
@@ -104,24 +143,15 @@ function updatePhysics(dt) {
     drone.velocity.multiplyScalar(1 - DRAG);
     drone.position.add(drone.velocity.clone().multiplyScalar(dt));
 
-    // Simple Floor Collision
-    if (drone.position.y < 0.2) {
-        drone.position.y = 0.2;
-        drone.velocity.set(0,0,0);
-    }
-
-    // Reset
-    if (keys['KeyR']) {
-        drone.position.set(0, 10, 50);
-        drone.velocity.set(0,0,0);
-        drone.rotation.set(0,0,0);
-    }
+    checkCollisions();
 
     camera.position.copy(drone.position);
     camera.quaternion.setFromEuler(drone.rotation);
 
     document.getElementById('alt').innerText = drone.position.y.toFixed(1);
     document.getElementById('spd').innerText = (drone.velocity.length() * 3.6).toFixed(0);
+    
+    if (keys['KeyR']) resetDrone();
 }
 
 function animate() {
